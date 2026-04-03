@@ -167,7 +167,7 @@ class JointBranchWrapper(nn.Module):
 
 def run_deepshap(config_path="config.yaml", n_explain=2000, n_background=100,
                   atg_window=None, stop_window=None, seed=None, run_id=None,
-                  branches=None):
+                  branches=None, orf_index=0):
     config = load_config(config_path)
     seed = seed if seed is not None else config["training"]["seed"]
     set_seed(seed)
@@ -177,6 +177,7 @@ def run_deepshap(config_path="config.yaml", n_explain=2000, n_background=100,
     ws_stop = stop_window or config["data"]["window_size_stop"]
     tag = f"atg{ws_atg}_stop{ws_stop}"
     run_suffix = f"_run{run_id}" if run_id is not None else ""
+    orf_suffix = f"_orf{orf_index}" if orf_index != 0 else ""
     results_dir = Path("results")
     h5_path = config["data"]["hdf5_path"]
 
@@ -195,7 +196,7 @@ def run_deepshap(config_path="config.yaml", n_explain=2000, n_background=100,
     test_ds = NMDDataset(h5_path, ws_atg, ws_stop, split="test_clean")
     train_ds = NMDDataset(h5_path, ws_atg, ws_stop, split="train")
 
-    orf_index = 0  # top-Kozak ORF
+    print(f"ORF index: {orf_index}")
 
     # Subsample for tractability (n_explain=0 means all test samples)
     rng = np.random.RandomState(seed)
@@ -224,22 +225,31 @@ def run_deepshap(config_path="config.yaml", n_explain=2000, n_background=100,
         print(f"{'='*40}")
 
         # Build background tensor (target ORF's window only)
+        # Filter to samples where this ORF rank is present
+        bg_idx_masked = [i for i in bg_idx if train_ds[i]["orf_mask"][orf_index]]
         if branch == "atg":
             bg_data = np.stack([train_ds[i]["atg_windows"][orf_index].numpy()
-                                for i in bg_idx])
+                                for i in bg_idx_masked])
         else:
             bg_data = np.stack([train_ds[i]["stop_windows"][orf_index].numpy()
-                                for i in bg_idx])
+                                for i in bg_idx_masked])
         bg_tensor = torch.tensor(bg_data, dtype=torch.float32).to(device)
+
+        # Filter explain samples to those with this ORF rank present
+        seq_explain_idx = np.array([i for i in explain_idx
+                                    if test_ds[i]["orf_mask"][orf_index]])
+        if len(seq_explain_idx) < len(explain_idx):
+            print(f"  Filtered to {len(seq_explain_idx)}/{len(explain_idx)} "
+                  f"samples with ORF rank {orf_index} present")
 
         # Explain in batches — each sample uses its own context
         all_shap = []
         all_inputs = []
         all_labels = []
 
-        for start in range(0, len(explain_idx), batch_size):
-            end = min(start + batch_size, len(explain_idx))
-            batch_idx = explain_idx[start:end]
+        for start in range(0, len(seq_explain_idx), batch_size):
+            end = min(start + batch_size, len(seq_explain_idx))
+            batch_idx = seq_explain_idx[start:end]
 
             batch_shap = []
             for i in batch_idx:
@@ -281,19 +291,19 @@ def run_deepshap(config_path="config.yaml", n_explain=2000, n_background=100,
             all_inputs.append(inputs)
             all_labels.append(labels)
 
-            print(f"  Explained {end}/{len(explain_idx)} samples")
+            print(f"  Explained {end}/{len(seq_explain_idx)} samples")
 
         shap_arr = np.concatenate(all_shap, axis=0)
         input_arr = np.concatenate(all_inputs, axis=0)
         label_arr = np.concatenate(all_labels, axis=0)
 
         # Save
-        out_path = results_dir / f"deepshap_{branch}_{tag}{run_suffix}.npz"
+        out_path = results_dir / f"deepshap_{branch}_{tag}{orf_suffix}{run_suffix}.npz"
         np.savez_compressed(out_path,
                             shap_values=shap_arr,
                             inputs=input_arr,
                             labels=label_arr,
-                            explain_indices=explain_idx,
+                            explain_indices=seq_explain_idx,
                             channel_names=["A", "C", "G", "T", "junction",
                                           "rolling_gc", "frame_0", "frame_1",
                                           "frame_2"],
@@ -311,18 +321,26 @@ def run_deepshap(config_path="config.yaml", n_explain=2000, n_background=100,
         print(f"DeepSHAP for STRUCTURAL features ({len(orf_feat_names)} features)")
         print(f"{'='*40}")
 
-        # Background: rank-0 ORF structural features from training samples
+        # Background: ORF structural features from training samples
+        bg_idx_masked_s = [i for i in bg_idx if train_ds[i]["orf_mask"][orf_index]]
         bg_struct = np.stack([train_ds[i]["orf_features"][orf_index].numpy()
-                              for i in bg_idx])
+                              for i in bg_idx_masked_s])
         bg_struct_tensor = torch.tensor(bg_struct, dtype=torch.float32).to(device)
+
+        # Filter to samples where this ORF rank is present
+        struct_explain_idx = np.array([i for i in explain_idx
+                                       if test_ds[i]["orf_mask"][orf_index]])
+        if len(struct_explain_idx) < len(explain_idx):
+            print(f"  Filtered to {len(struct_explain_idx)}/{len(explain_idx)} "
+                  f"samples with ORF rank {orf_index} present")
 
         all_shap_s = []
         all_inputs_s = []
         all_labels_s = []
 
-        for start in range(0, len(explain_idx), batch_size):
-            end = min(start + batch_size, len(explain_idx))
-            batch_idx = explain_idx[start:end]
+        for start in range(0, len(struct_explain_idx), batch_size):
+            end = min(start + batch_size, len(struct_explain_idx))
+            batch_idx = struct_explain_idx[start:end]
 
             batch_shap = []
             for i in batch_idx:
@@ -355,18 +373,18 @@ def run_deepshap(config_path="config.yaml", n_explain=2000, n_background=100,
             all_inputs_s.append(inputs_s)
             all_labels_s.append(labels_s)
 
-            print(f"  Explained {end}/{len(explain_idx)} samples")
+            print(f"  Explained {end}/{len(struct_explain_idx)} samples")
 
         shap_struct = np.concatenate(all_shap_s, axis=0)   # (N, n_features)
         input_struct = np.concatenate(all_inputs_s, axis=0)
         label_struct = np.concatenate(all_labels_s, axis=0)
 
-        out_path = results_dir / f"deepshap_structural_{tag}{run_suffix}.npz"
+        out_path = results_dir / f"deepshap_structural_{tag}{orf_suffix}{run_suffix}.npz"
         np.savez_compressed(out_path,
                             shap_values=shap_struct,
                             inputs=input_struct,
                             labels=label_struct,
-                            explain_indices=explain_idx,
+                            explain_indices=struct_explain_idx,
                             feature_names=orf_feat_names,
                             seed=np.array(seed))
         print(f"  -> Saved {out_path} ({shap_struct.shape})")
@@ -382,20 +400,25 @@ def run_deepshap(config_path="config.yaml", n_explain=2000, n_background=100,
         joint_dim = n_ch * w_atg_actual + n_ch * w_stop_actual + n_feat
 
         print(f"\n{'='*40}")
-        print(f"DeepSHAP JOINT (all rank-0 inputs, dim={joint_dim})")
+        print(f"DeepSHAP JOINT (ORF rank {orf_index} inputs, dim={joint_dim})")
         print(f"  ATG: {n_ch}x{w_atg_actual}={n_ch*w_atg_actual}, "
               f"Stop: {n_ch}x{w_stop_actual}={n_ch*w_stop_actual}, "
               f"Struct: {n_feat}")
         print(f"{'='*40}")
 
-        # Background: concatenated rank-0 inputs from training samples
+        # Background: concatenated ORF inputs from training samples
+        # Only use training samples where this ORF rank is present (mask=True)
         bg_parts = []
         for i in bg_idx:
             s = train_ds[i]
+            if not s["orf_mask"][orf_index]:
+                continue
             atg_flat = s["atg_windows"][orf_index].reshape(-1)    # (C*W_atg,)
             stop_flat = s["stop_windows"][orf_index].reshape(-1)  # (C*W_stop,)
             struct_flat = s["orf_features"][orf_index]             # (F,)
             bg_parts.append(torch.cat([atg_flat, stop_flat, struct_flat]))
+        if len(bg_parts) < 10:
+            print(f"  WARNING: only {len(bg_parts)} background samples have ORF rank {orf_index}")
         bg_joint = torch.stack(bg_parts).float().to(device)  # (n_bg, joint_dim)
         print(f"  Background tensor: {bg_joint.shape}")
 
@@ -403,9 +426,16 @@ def run_deepshap(config_path="config.yaml", n_explain=2000, n_background=100,
         all_inputs_j = []
         all_labels_j = []
 
-        for start in range(0, len(explain_idx), batch_size):
-            end = min(start + batch_size, len(explain_idx))
-            batch_idx = explain_idx[start:end]
+        # Filter to samples where this ORF rank is present
+        joint_explain_idx = np.array([i for i in explain_idx
+                                      if test_ds[i]["orf_mask"][orf_index]])
+        if len(joint_explain_idx) < len(explain_idx):
+            print(f"  Filtered to {len(joint_explain_idx)}/{len(explain_idx)} "
+                  f"samples with ORF rank {orf_index} present")
+
+        for start in range(0, len(joint_explain_idx), batch_size):
+            end = min(start + batch_size, len(joint_explain_idx))
+            batch_idx = joint_explain_idx[start:end]
 
             batch_shap = []
             for i in batch_idx:
@@ -422,7 +452,6 @@ def run_deepshap(config_path="config.yaml", n_explain=2000, n_background=100,
 
                 explainer = shap.DeepExplainer(wrapper, bg_joint)
 
-                # Concatenate this sample's rank-0 inputs
                 inp_flat = torch.cat([
                     sample["atg_windows"][orf_index].reshape(-1),
                     sample["stop_windows"][orf_index].reshape(-1),
@@ -452,19 +481,19 @@ def run_deepshap(config_path="config.yaml", n_explain=2000, n_background=100,
             all_inputs_j.append(np.stack(batch_inputs))
             all_labels_j.append(labels_j)
 
-            print(f"  Explained {end}/{len(explain_idx)} samples")
+            print(f"  Explained {end}/{len(joint_explain_idx)} samples")
 
         shap_joint = np.concatenate(all_shap_j, axis=0)    # (N, joint_dim)
         input_joint = np.concatenate(all_inputs_j, axis=0)
         label_joint = np.concatenate(all_labels_j, axis=0)
 
         # Save with metadata for unpacking
-        out_path = results_dir / f"deepshap_joint_{tag}{run_suffix}.npz"
+        out_path = results_dir / f"deepshap_joint_{tag}{orf_suffix}{run_suffix}.npz"
         np.savez_compressed(out_path,
                             shap_values=shap_joint,
                             inputs=input_joint,
                             labels=label_joint,
-                            explain_indices=explain_idx,
+                            explain_indices=joint_explain_idx,
                             n_channels=np.array(n_ch),
                             w_atg=np.array(w_atg_actual),
                             w_stop=np.array(w_stop_actual),
@@ -482,7 +511,7 @@ def run_deepshap(config_path="config.yaml", n_explain=2000, n_background=100,
         nmd_idx_check = np.where(nmd_mask)[0][:10]
         for idx in nmd_idx_check:
             shap_sum = shap_joint[idx].sum()
-            sample = test_ds[explain_idx[idx]]
+            sample = test_ds[joint_explain_idx[idx]]
             # Reconstruct this sample's wrapper for correct E[f(x)]
             check_wrapper = JointBranchWrapper(
                 model, n_ch, w_atg_actual, w_stop_actual, n_feat,
@@ -514,7 +543,7 @@ def run_deepshap(config_path="config.yaml", n_explain=2000, n_background=100,
 
     # Sequence branches (ATG, stop): per-channel, averaged across positions
     for branch in seq_branches:
-        npz_path = results_dir / f"deepshap_{branch}_{tag}{run_suffix}.npz"
+        npz_path = results_dir / f"deepshap_{branch}_{tag}{orf_suffix}{run_suffix}.npz"
         if not npz_path.exists():
             continue
         data = np.load(npz_path)
@@ -535,7 +564,7 @@ def run_deepshap(config_path="config.yaml", n_explain=2000, n_background=100,
             })
 
     # Structural branch: per-feature (no positional dimension)
-    struct_npz = results_dir / f"deepshap_structural_{tag}{run_suffix}.npz"
+    struct_npz = results_dir / f"deepshap_structural_{tag}{orf_suffix}{run_suffix}.npz"
     if run_structural and struct_npz.exists():
         struct_data = np.load(struct_npz)
         struct_shap = struct_data["shap_values"]   # (N, n_features) or (N, n_features, 1)
@@ -557,7 +586,7 @@ def run_deepshap(config_path="config.yaml", n_explain=2000, n_background=100,
             })
 
     # Joint branch: summarize by splitting back into ATG/stop/structural regions
-    joint_npz = results_dir / f"deepshap_joint_{tag}{run_suffix}.npz"
+    joint_npz = results_dir / f"deepshap_joint_{tag}{orf_suffix}{run_suffix}.npz"
     if run_joint and joint_npz.exists():
         jd = np.load(joint_npz)
         jshap = jd["shap_values"]
@@ -622,7 +651,7 @@ def run_deepshap(config_path="config.yaml", n_explain=2000, n_background=100,
 
     if summary_rows:
         summary_df = pd.DataFrame(summary_rows)
-        summary_path = results_dir / f"deepshap_summary_{tag}{run_suffix}.tsv"
+        summary_path = results_dir / f"deepshap_summary_{tag}{orf_suffix}{run_suffix}.tsv"
         summary_df.to_csv(summary_path, sep="\t", index=False)
         print(f"  -> {summary_path}")
 
@@ -645,7 +674,9 @@ if __name__ == "__main__":
     parser.add_argument("--branches", nargs="+", default=None,
                         choices=["atg", "stop", "structural", "joint"],
                         help="Which branches to run (default: atg stop structural)")
+    parser.add_argument("--orf-index", type=int, default=0,
+                        help="Which ORF rank to explain (0-4, default: 0)")
     args = parser.parse_args()
     run_deepshap(args.config, args.n_explain, args.n_background,
                  args.atg_window, args.stop_window, args.seed, args.run_id,
-                 args.branches)
+                 args.branches, args.orf_index)
