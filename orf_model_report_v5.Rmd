@@ -305,7 +305,7 @@ The model's input is derived from full-length spliced transcript sequences (SQAN
 
 - **Rank 0:** The ORF whose ATG matches the **reference CDS** — the reading frame of the gene's dominant non-NMD isoform. Available for ~73% of transcripts; when unavailable, this slot is filled by the next priority tier.
 - **Rank 1:** The ORF matching the **SQANTI/TransDecoder2 CDS** call (longest ORF with homology support), if different from the reference CDS.
-- **Ranks 2–4:** Remaining slots filled by ORFs with the highest **Kozak consensus scores**. Ties are broken by the ORFik scan order (pandas stable sort), which reflects genomic position along the transcript.
+- **Ranks 2–4:** Remaining slots filled by ORFs with the highest **Kozak consensus scores**. Ties in Kozak score are broken by transcript position (5'-most ORF wins), reflecting the ORFik scan order preserved by pandas stable sort.
 
 For each selected ORF, the model receives three inputs:
 
@@ -1502,7 +1502,7 @@ if (has_pa_sqanti) {
     scale_fill_manual(values = pal) +
     scale_y_continuous(labels = percent_format()) +
     labs(title = "B. Poly(A) Motif Type Distribution",
-         subtitle = sprintf("Among poly(A)+ transcripts, top 4 motifs. Chi-sq = %.1f, p = %s.",
+         subtitle = sprintf("Top 4 motifs shown. Chi-sq = %.1f, p = %s.",
                             as.numeric(chi_motif$statistic),
                             ifelse(chi_motif$p.value < 0.001, sprintf("%.1e", chi_motif$p.value),
                                    sprintf("%.3f", chi_motif$p.value))),
@@ -1997,7 +1997,7 @@ if (has_sg_profiles) {
 
   p_atg_sg <- atg_sg_prof %>%
     ggplot(aes(x = relative_position, y = total_nuc_abs_shap, color = subgroup)) +
-    geom_smooth(method = "loess", span = 0.15, se = FALSE, linewidth = 0.8) +
+    geom_smooth(method = "loess", span = 0.15, se = TRUE, alpha = 0.1, linewidth = 0.8) +
     geom_vline(xintercept = 0, linetype = "dashed", alpha = 0.5) +
     scale_color_manual(values = subgroup_pal_short) +
     annotate("text", x = -100, y = Inf, label = "5'UTR", size = 3, color = "grey40", vjust = 2) +
@@ -2014,7 +2014,7 @@ if (has_sg_profiles) {
 ```{r fig6-stop-profile-subgroup, eval=has_sg_profiles, fig.width=10, fig.height=5}
 p_stop_sg <- stop_sg_prof %>%
   ggplot(aes(x = relative_position, y = total_nuc_abs_shap, color = subgroup)) +
-  geom_smooth(method = "loess", span = 0.15, se = FALSE, linewidth = 0.8) +
+  geom_smooth(method = "loess", span = 0.15, se = TRUE, alpha = 0.1, linewidth = 0.8) +
   geom_vline(xintercept = 0, linetype = "dashed", alpha = 0.5) +
   scale_color_manual(values = subgroup_pal_short) +
   annotate("text", x = -150, y = Inf, label = "ORF body", size = 3, color = "grey40", vjust = 2) +
@@ -2631,12 +2631,13 @@ p_orf_overall <- orf_by_class %>%
   geom_errorbar(aes(ymin = mean_shap - se, ymax = mean_shap + se),
                 position = position_dodge(width = 0.6), width = 0.15) +
   geom_text(aes(label = sprintf("%.1f", mean_shap)),
-            position = position_dodge(width = 0.6), vjust = -0.8, size = 3) +
+            position = position_dodge(width = 0.6), vjust = -0.8, size = 2.8) +
   scale_fill_manual(values = pal) +
-  labs(title = sprintf("O. Joint DeepSHAP: Total |SHAP| by ORF Rank (n=%s transcripts)",
+  scale_y_sqrt(breaks = c(0, 1, 2, 5, 10, 15, 20, 25)) +
+  labs(title = sprintf("O. Joint DeepSHAP: Mean Total SHAP Magnitude by ORF Rank (n=%s transcripts)",
                        format(length(unique(all_orfs$isoform_id)), big.mark = ",")),
-       subtitle = "ORF 0 (rank-0, priority CDS) dominates; secondary ORFs contribute modestly.",
-       x = "ORF rank", y = "Mean total |SHAP|", fill = NULL) +
+       subtitle = "ORF 0 (rank-0, priority CDS) dominates; secondary ORFs contribute modestly. Y-axis: square-root scale.",
+       x = "ORF rank", y = expression("Mean total" ~ group("|", SHAP, "|")), fill = NULL) +
   theme(legend.position = "top")
 
 # Panel P: Branch decomposition by ORF rank (NMD only)
