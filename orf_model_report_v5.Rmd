@@ -2596,7 +2596,112 @@ render_dt(q_summary %>%
 - **(Data)** NMD PTC- and NMD PTC-, ref ATG lost subgroups have higher attention entropy than NMD PTC+, indicating the model is less certain which ORF to focus on for non-canonical transcripts.
 - **(Data)** Accuracy declines monotonically with entropy: Q1 (`r round(100*q_summary$accuracy[q_summary$entropy_quartile == "Q1 (low)"], 1)`%) to Q4 (`r round(100*q_summary$accuracy[q_summary$entropy_quartile == "Q4 (high)"], 1)`%). This is consistent with the subgroup analysis — the high-entropy quartile is enriched for PTC- and ref-ATG-lost transcripts.
 
-## 6.10 Summary {#sec6-summary}
+## 6.10 Joint DeepSHAP Across All 5 ORFs {#sec6-all-orfs}
+
+```{r fig6-all-orfs-setup}
+# ── Data provenance ──
+# Source: deepshap_all_orfs_summary_{tag}.tsv — per-sample per-ORF total |SHAP|
+# Produced by aggregating deepshap_joint_{tag}[_orf{1-4}]_run1.npz files
+# Population: all test transcripts, 500 background, joint DeepSHAP run 1
+
+all_orfs_path <- file.path(results_dir, paste0("deepshap_all_orfs_summary_", best_tag, ".tsv"))
+has_all_orfs <- file.exists(all_orfs_path)
+```
+
+```{r fig6-all-orfs, eval=has_all_orfs, fig.width=10, fig.height=10}
+all_orfs <- read.delim(all_orfs_path)
+
+# Join with subgroup assignments
+all_orfs_sg <- all_orfs %>%
+  left_join(sec8_data %>% select(isoform_id, subgroup),
+            by = "isoform_id") %>%
+  filter(!is.na(subgroup))
+
+# Panel O: Mean total |SHAP| by ORF rank (NMD vs Control)
+orf_by_class <- all_orfs %>%
+  mutate(class = ifelse(label == 1, "NMD", "Control")) %>%
+  group_by(orf_rank, class) %>%
+  summarise(mean_shap = mean(total_abs_shap),
+            se = sd(total_abs_shap) / sqrt(n()),
+            n = n(), .groups = "drop")
+
+p_orf_overall <- orf_by_class %>%
+  ggplot(aes(x = factor(orf_rank), y = mean_shap, fill = class)) +
+  geom_col(position = "dodge", width = 0.6) +
+  geom_errorbar(aes(ymin = mean_shap - se, ymax = mean_shap + se),
+                position = position_dodge(width = 0.6), width = 0.15) +
+  geom_text(aes(label = sprintf("%.1f", mean_shap)),
+            position = position_dodge(width = 0.6), vjust = -0.8, size = 3) +
+  scale_fill_manual(values = pal) +
+  labs(title = sprintf("O. Joint DeepSHAP: Total |SHAP| by ORF Rank (n=%s transcripts)",
+                       format(length(unique(all_orfs$isoform_id)), big.mark = ",")),
+       subtitle = "ORF 0 (rank-0, priority CDS) dominates; secondary ORFs contribute modestly.",
+       x = "ORF rank", y = "Mean total |SHAP|", fill = NULL) +
+  theme(legend.position = "top")
+
+# Panel P: Branch decomposition by ORF rank (NMD only)
+branch_by_orf <- all_orfs %>%
+  filter(label == 1) %>%
+  group_by(orf_rank) %>%
+  summarise(ATG = mean(atg_abs_shap),
+            Stop = mean(stop_abs_shap),
+            Structural = mean(struct_abs_shap),
+            .groups = "drop") %>%
+  pivot_longer(cols = c(ATG, Stop, Structural), names_to = "branch", values_to = "mean_shap") %>%
+  mutate(branch = factor(branch, levels = c("Structural", "Stop", "ATG")))
+
+p_branch_orf <- branch_by_orf %>%
+  ggplot(aes(x = factor(orf_rank), y = mean_shap, fill = branch)) +
+  geom_col(width = 0.6) +
+  scale_fill_manual(values = c("Structural" = "#d95f02", "Stop" = "#FF6B6B", "ATG" = "#4ECDC4")) +
+  labs(title = "P. Branch Decomposition by ORF Rank (NMD transcripts)",
+       subtitle = "ORF 0 drives prediction through all three branches; secondary ORFs contribute primarily through sequence.",
+       x = "ORF rank", y = "Mean total |SHAP|", fill = NULL)
+
+# Panel Q: Per-ORF |SHAP| by subgroup (NMD only)
+orf_by_sg <- all_orfs_sg %>%
+  filter(label == 1) %>%
+  group_by(orf_rank, subgroup) %>%
+  summarise(mean_shap = mean(total_abs_shap), .groups = "drop")
+
+p_orf_sg <- orf_by_sg %>%
+  ggplot(aes(x = factor(orf_rank), y = mean_shap, fill = subgroup)) +
+  geom_col(position = "dodge", width = 0.7) +
+  scale_fill_manual(values = subgroup_pal_short) +
+  labs(title = "Q. Joint DeepSHAP by ORF Rank and NMD Subgroup",
+       subtitle = "PTC+ concentrates importance on ORF 0; PTC- subgroups distribute more to secondary ORFs.",
+       x = "ORF rank", y = "Mean total |SHAP|", fill = NULL) +
+  theme(legend.position = "top", legend.text = element_text(size = 9))
+
+save_fig(p_orf_overall / p_branch_orf / p_orf_sg,
+         "fig6_all_orfs_shap", width = 10, height = 14)
+```
+
+```{r tbl6-all-orfs, eval=has_all_orfs}
+# Summary table: fraction of total |SHAP| by ORF rank
+orf_frac <- all_orfs_sg %>%
+  filter(label == 1) %>%
+  group_by(isoform_id, subgroup) %>%
+  mutate(total_across_orfs = sum(total_abs_shap),
+         frac = total_abs_shap / total_across_orfs) %>%
+  ungroup() %>%
+  group_by(subgroup, orf_rank) %>%
+  summarise(mean_frac = round(100 * mean(frac), 1),
+            mean_abs_shap = round(mean(total_abs_shap), 2),
+            .groups = "drop") %>%
+  pivot_wider(names_from = orf_rank, values_from = c(mean_frac, mean_abs_shap),
+              names_glue = "orf{orf_rank}_{.value}")
+
+render_dt(orf_frac, caption = "Table 6e: Fraction of total |SHAP| by ORF rank and subgroup (NMD only)")
+```
+
+**Observations:**
+
+- **(Data)** ORF 0 (the priority CDS ORF) accounts for the vast majority of total |SHAP| across all subgroups. Secondary ORFs (ranks 1–4) contribute modestly, with diminishing importance at higher ranks.
+- **(Data)** The NMD vs Control gap is concentrated in ORF 0: NMD transcripts show substantially higher |SHAP| at rank 0, while secondary ORFs show similar |SHAP| between classes.
+- **(Data)** PTC- subgroups show relatively higher fractional contribution from secondary ORFs compared to PTC+, consistent with the higher attention entropy and more distributed prediction strategy observed in Sections 6.8–6.9.
+
+## 6.11 Summary {#sec6-summary}
 
 The subgroup analyses in this section converge on a consistent picture. NMD transcripts that lack the canonical PTC + EJC signature fall into two structurally distinct subgroups — **PTC-, ref ATG retained** (ref reading frame terminates without downstream EJCs) and **PTC-, ref ATG lost** (ref ATG unavailable due to alternative TSS or structural differences):
 
