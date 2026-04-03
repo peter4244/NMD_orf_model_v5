@@ -325,6 +325,59 @@ def compute_gc_channel_by_region(shap_atg, inputs_atg, shap_stop, inputs_stop,
 
 
 # ---------------------------------------------------------------------------
+# Motif logo by subgroup (from joint DeepSHAP)
+# ---------------------------------------------------------------------------
+def compute_motif_logo_subgroup(shap_branch, inputs_branch, subgroups, center_pos,
+                                 window=15):
+    """SHAP x input motif at positions around ATG or stop, by subgroup."""
+    nucs = ["A", "C", "G", "T"]
+    rows = []
+    for sg in ["NMD PTC+", "NMD PTC-, ref ATG retained", "NMD PTC-, ref ATG lost", "Control"]:
+        mask = subgroups == sg
+        n = int(mask.sum())
+        if n == 0:
+            continue
+        for offset in range(-window, window + 1):
+            pos = center_pos + offset
+            if pos < 0 or pos >= shap_branch.shape[2]:
+                continue
+            for ch_idx, nuc in enumerate(nucs):
+                gxi = shap_branch[mask, ch_idx, pos] * inputs_branch[mask, ch_idx, pos]
+                freq = inputs_branch[mask, ch_idx, pos].mean()
+                rows.append({
+                    "subgroup": sg,
+                    "relative_position": offset,
+                    "channel": nuc,
+                    "mean_contrib": float(gxi.mean()),
+                    "freq": float(freq),
+                    "n_samples": n,
+                })
+    return pd.DataFrame(rows)
+
+
+def compute_shap_profile_subgroup(shap_branch, subgroups, center_pos):
+    """Per-position total nucleotide |SHAP| by subgroup (full window)."""
+    n_pos = shap_branch.shape[2]
+    rows = []
+    for sg in ["NMD PTC+", "NMD PTC-, ref ATG retained", "NMD PTC-, ref ATG lost", "Control"]:
+        mask = subgroups == sg
+        n = int(mask.sum())
+        if n == 0:
+            continue
+        # Sum absolute SHAP across A, C, G, T channels (first 4)
+        nuc_abs = np.abs(shap_branch[mask, :4, :]).sum(axis=1)  # (n, n_pos)
+        mean_per_pos = nuc_abs.mean(axis=0)  # (n_pos,)
+        for pos in range(n_pos):
+            rows.append({
+                "subgroup": sg,
+                "relative_position": pos - center_pos,
+                "total_nuc_abs_shap": float(mean_per_pos[pos]),
+                "n_samples": n,
+            })
+    return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main():
@@ -558,6 +611,119 @@ def main():
             ["mean_abs_shap", "pct_of_total", "mean_signed_shap"],
             "subgroup_gc_channel"
         )
+
+    # ── Joint DeepSHAP: motif logos and SHAP profiles by subgroup ──
+    # These use the joint NPZ (ATG+stop+struct flattened) and split back
+    # into branch-specific arrays for per-position analysis.
+    print(f"\n{'='*50}")
+    print("Processing joint DeepSHAP for motif logos and SHAP profiles ...")
+    print(f"{'='*50}")
+
+    all_motif_atg = []
+    all_motif_stop = []
+    all_profile_atg = []
+    all_profile_stop = []
+
+    n_ch = 9  # channels in sequence encoding
+
+    for run in range(1, args.n_runs + 1):
+        joint_path = results_dir / f"deepshap_joint_{tag}_run{run}.npz"
+        if not joint_path.exists():
+            print(f"  SKIP joint run {run}: {joint_path} not found")
+            continue
+
+        print(f"  Loading joint run {run} ...")
+        jd = np.load(joint_path, allow_pickle=True)
+        jshap = jd["shap_values"]
+        if jshap.ndim == 3 and jshap.shape[-1] == 1:
+            jshap = jshap.squeeze(-1)
+        jinputs = jd["inputs"]
+        if jinputs.ndim == 3 and jinputs.shape[-1] == 1:
+            jinputs = jinputs.squeeze(-1)
+        jlabels = jd["labels"]
+        jidx = jd["explain_indices"]
+        j_w_atg = int(jd["w_atg"])
+        j_w_stop = int(jd["w_stop"])
+
+        atg_end = n_ch * j_w_atg
+        stop_end = atg_end + n_ch * j_w_stop
+
+        # Reshape into branch-specific arrays: (N, C, W)
+        shap_atg_j = jshap[:, :atg_end].reshape(-1, n_ch, j_w_atg)
+        shap_stop_j = jshap[:, atg_end:stop_end].reshape(-1, n_ch, j_w_stop)
+        inp_atg_j = jinputs[:, :atg_end].reshape(-1, n_ch, j_w_atg)
+        inp_stop_j = jinputs[:, atg_end:stop_end].reshape(-1, n_ch, j_w_stop)
+
+        sg_j = subgroup_map.iloc[jidx].values
+        atg_pos = j_w_atg // 2
+        stop_pos = j_w_stop // 2
+
+        n_nmd = (jlabels == 1).sum()
+        print(f"    {len(jidx)} samples ({n_nmd} NMD)")
+        for sg in ["NMD PTC+", "NMD PTC-, ref ATG retained", "NMD PTC-, ref ATG lost", "Control"]:
+            print(f"      {sg}: {(sg_j == sg).sum()}")
+
+        # Motif logos (±15bp around ATG and stop)
+        motif_atg = compute_motif_logo_subgroup(shap_atg_j, inp_atg_j, sg_j, atg_pos, window=15)
+        motif_atg["run"] = run
+        all_motif_atg.append(motif_atg)
+
+        motif_stop = compute_motif_logo_subgroup(shap_stop_j, inp_stop_j, sg_j, stop_pos, window=15)
+        motif_stop["run"] = run
+        all_motif_stop.append(motif_stop)
+
+        # SHAP profiles (full window)
+        profile_atg = compute_shap_profile_subgroup(shap_atg_j, sg_j, atg_pos)
+        profile_atg["run"] = run
+        all_profile_atg.append(profile_atg)
+
+        profile_stop = compute_shap_profile_subgroup(shap_stop_j, sg_j, stop_pos)
+        profile_stop["run"] = run
+        all_profile_stop.append(profile_stop)
+
+    # Save motif logos and profiles (single-run files for direct use, no aggregation needed)
+    if all_motif_atg:
+        # For motif logos, average across runs
+        motif_atg_all = pd.concat(all_motif_atg, ignore_index=True)
+        motif_atg_avg = motif_atg_all.groupby(["subgroup", "relative_position", "channel"]).agg(
+            mean_contrib=("mean_contrib", "mean"),
+            freq=("freq", "mean"),
+            n_samples=("n_samples", "first"),
+        ).reset_index()
+        path = results_dir / f"motif_logo_atg_subgroup_joint_{tag}.tsv"
+        motif_atg_avg.to_csv(path, sep="\t", index=False)
+        print(f"  -> {path} ({len(motif_atg_avg)} rows)")
+
+    if all_motif_stop:
+        motif_stop_all = pd.concat(all_motif_stop, ignore_index=True)
+        motif_stop_avg = motif_stop_all.groupby(["subgroup", "relative_position", "channel"]).agg(
+            mean_contrib=("mean_contrib", "mean"),
+            freq=("freq", "mean"),
+            n_samples=("n_samples", "first"),
+        ).reset_index()
+        path = results_dir / f"motif_logo_stop_subgroup_joint_{tag}.tsv"
+        motif_stop_avg.to_csv(path, sep="\t", index=False)
+        print(f"  -> {path} ({len(motif_stop_avg)} rows)")
+
+    if all_profile_atg:
+        profile_atg_all = pd.concat(all_profile_atg, ignore_index=True)
+        profile_atg_avg = profile_atg_all.groupby(["subgroup", "relative_position"]).agg(
+            total_nuc_abs_shap=("total_nuc_abs_shap", "mean"),
+            n_samples=("n_samples", "first"),
+        ).reset_index()
+        path = results_dir / f"shap_profile_atg_subgroup_joint_{tag}.tsv"
+        profile_atg_avg.to_csv(path, sep="\t", index=False)
+        print(f"  -> {path} ({len(profile_atg_avg)} rows)")
+
+    if all_profile_stop:
+        profile_stop_all = pd.concat(all_profile_stop, ignore_index=True)
+        profile_stop_avg = profile_stop_all.groupby(["subgroup", "relative_position"]).agg(
+            total_nuc_abs_shap=("total_nuc_abs_shap", "mean"),
+            n_samples=("n_samples", "first"),
+        ).reset_index()
+        path = results_dir / f"shap_profile_stop_subgroup_joint_{tag}.tsv"
+        profile_stop_avg.to_csv(path, sep="\t", index=False)
+        print(f"  -> {path} ({len(profile_stop_avg)} rows)")
 
     print("\nDone.")
 

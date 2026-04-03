@@ -2089,10 +2089,95 @@ if (has_atg_sg) {
 }
 ```
 
+```{r sec6-kozak-subgroup, fig.width=10, fig.height=8}
+# ── Data provenance ──
+# Source: selected_orfs.tsv (rank-0 ORFs) + SQANTI-corrected FASTA
+# Kozak scores: ORFik kozak_score (0-2) and Isopair scoreKozakPWM (log-odds PWM)
+
+library(Biostrings)
+
+fasta_path <- "/Users/petecastaldi/claude_projects/nmd/sqanti/nmd_lungcells/results/nmd_lungcells_corrected.fasta"
+has_fasta <- file.exists(fasta_path)
+
+if (has_fasta) {
+  sel_orfs <- read.delim(file.path(results_dir, "selected_orfs.tsv")) %>%
+    filter(orf_rank == 0, isoform_id %in% preds$isoform_id)
+
+  # Assign subgroups
+  kozak_data <- sel_orfs %>%
+    left_join(preds %>% select(isoform_id, label), by = "isoform_id") %>%
+    left_join(ref_features %>% select(isoform_id, category), by = "isoform_id") %>%
+    left_join(td2_features %>% select(isoform_id, td2_downstream_ejc), by = "isoform_id") %>%
+    mutate(subgroup = case_when(
+      label == 0 ~ "Control",
+      label == 1 & category == "effectively_ptc" ~ "NMD PTC+",
+      label == 1 & category %in% c("ref_atg_lost", "no_ref_isoform",
+                                    "not_atg_in_target", "no_stop_in_target") &
+        !is.na(td2_downstream_ejc) & td2_downstream_ejc > 0 ~ "NMD PTC+",
+      label == 1 & category %in% c("no_downstream_ejc", "truncated_no_ejc") ~
+        "NMD PTC-, ref ATG retained",
+      label == 1 & category %in% c("ref_atg_lost", "no_ref_isoform",
+                                    "not_atg_in_target", "no_stop_in_target") ~
+        "NMD PTC-, ref ATG lost",
+      TRUE ~ "NMD other"
+    )) %>%
+    filter(subgroup != "NMD other") %>%
+    mutate(subgroup = factor(subgroup, levels = names(subgroup_pal_short)))
+
+  # Score with Isopair KozakPWM
+  tx_seqs <- readDNAStringSet(fasta_path)
+  names(tx_seqs) <- sub(" .*", "", names(tx_seqs))
+  kozak_data$seq <- as.character(tx_seqs[kozak_data$isoform_id])
+  kozak_pwm <- Isopair::scoreKozakPWM(kozak_data$seq, kozak_data$orf_start)
+  kozak_data$pwm_score <- kozak_pwm$score
+  rm(tx_seqs); gc(verbose = FALSE)
+
+  # Isopair KozakPWM by subgroup
+  p_pwm <- kozak_data %>%
+    ggplot(aes(x = subgroup, y = pwm_score, fill = subgroup)) +
+    geom_violin(alpha = 0.7, scale = "width") +
+    geom_boxplot(width = 0.15, fill = "white", alpha = 0.5, outlier.size = 0.3) +
+    stat_summary(fun = mean, geom = "point", shape = 18, size = 3) +
+    geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.3) +
+    scale_fill_manual(values = subgroup_pal_short) +
+    labs(title = "Kozak PWM Score at Rank-0 ORF ATG by Subgroup",
+         subtitle = "Isopair scoreKozakPWM: log-odds across 8 positions (-6 to +5). Diamond = mean. Dashed = neutral.",
+         x = NULL, y = "PWM score (log-odds)") +
+    guides(fill = "none") +
+    theme(axis.text.x = element_text(angle = 15, hjust = 1))
+
+  save_fig(p_pwm, "fig6_kozak_by_subgroup", width = 10, height = 5)
+}
+```
+
+```{r tbl6-kozak, eval=has_fasta}
+# Summary table with both Kozak measures and selection reason breakdown
+kozak_summary <- kozak_data %>%
+  group_by(subgroup) %>%
+  summarise(n = n(),
+            mean_orfik = round(mean(kozak_score, na.rm = TRUE), 3),
+            pct_strong_orfik = round(100 * mean(kozak_score == 2, na.rm = TRUE), 1),
+            mean_pwm = round(mean(pwm_score, na.rm = TRUE), 3),
+            median_pwm = round(median(pwm_score, na.rm = TRUE), 3),
+            pct_ref_cds = round(100 * mean(selection_reason == "ref_cds"), 1),
+            pct_sqanti = round(100 * mean(selection_reason == "sqanti_cds"), 1),
+            pct_kozak_fill = round(100 * mean(selection_reason == "kozak"), 1),
+            .groups = "drop")
+render_dt(kozak_summary,
+          caption = "Kozak strength at rank-0 ORF by subgroup (ORFik + Isopair PWM)")
+```
+
+**Variable definitions:**
+
+- **Kozak PWM score:** Log-odds score from `Isopair::scoreKozakPWM`, which evaluates the sequence context at 8 positions spanning -6 to +5 relative to the A of the ATG start codon. The position weight matrix (PWM) is derived from vertebrate translation initiation site frequencies. Positive scores indicate favorable initiation context; zero is neutral; negative scores indicate unfavorable context. The PWM captures contributions from all 8 positions simultaneously, providing a more nuanced measure than the binary ORFik score (which only checks purine at -3 and G at +4).
+- **Rank-0 ORF:** The priority-selected ORF for each transcript (see Section 0). For PTC+ and PTC- ref ATG retained, this is the **reference CDS ORF** (100%). For PTC- ref ATG lost, this is predominantly the **SQANTI/TD2 CDS ORF** (`r if(has_fasta) round(kozak_summary$pct_sqanti[kozak_summary$subgroup == "NMD PTC-, ref ATG lost"], 0)`%), since the reference ATG is unavailable.
+
 **Observations:**
 
-- **(Data)** The Kozak signal at position -3 (the canonical R position) is strongest in PTC+, consistent with the model recognizing well-conserved CDS start codons. PTC- ref ATG retained shows weaker and more diffuse start codon context signals.
-- **(Interpretation)** The weak start site signal in **PTC- ref ATG retained** reflects a key biological distinction. For this subgroup, the rank-0 ORF is the reference CDS itself (selected by priority in `data_prep.py`), but the reference reading frame does not produce a PTC with downstream EJCs. The Kozak context at this ATG is inherently weaker or less distinctive — the model cannot rely on canonical start-site features to predict NMD for these transcripts. This is consistent with the branch decomposition (Section 6.7), where PTC- ref ATG retained shifts away from the stop branch toward the ATG branch, suggesting the model searches for alternative signals (upstream ORFs, 5'UTR composition) rather than the reference ATG's Kozak context itself. The elevated ATG branch importance for this subgroup (Section 6.7) may reflect the model attending to the broader 5'UTR landscape surrounding the start codon rather than the canonical Kozak motif at the reference ATG.
+- **(Data)** The Kozak motif signal at position -3 (the canonical R position) is strongest in PTC+, consistent with the model recognizing well-conserved CDS start codons. PTC- ref ATG retained shows weaker and more diffuse start codon context signals.
+- **(Data)** The Kozak PWM confirms the subgroup hierarchy: **NMD PTC+** has the strongest initiation context (mean PWM = `r if(has_fasta) round(kozak_summary$mean_pwm[kozak_summary$subgroup == "NMD PTC+"], 2)`), followed by **Control** (`r if(has_fasta) round(kozak_summary$mean_pwm[kozak_summary$subgroup == "Control"], 2)`), then **PTC- ref ATG retained** (`r if(has_fasta) round(kozak_summary$mean_pwm[kozak_summary$subgroup == "NMD PTC-, ref ATG retained"], 2)`), and finally **PTC- ref ATG lost** (`r if(has_fasta) round(kozak_summary$mean_pwm[kozak_summary$subgroup == "NMD PTC-, ref ATG lost"], 2)`).
+- **(Data)** The weak Kozak in **PTC- ref ATG lost** reflects the ORF type, not NMD biology: these rank-0 ORFs are predominantly SQANTI/TD2 CDS calls (the reference ATG is unavailable), and TD2-selected ORFs have weak Kozak across the board — Control SQANTI ORFs show similarly low PWM scores. The SHAP motif logos (above) may show intermediate signal for this group because they reflect the model's *use* of whatever Kozak context is present, not the absolute Kozak strength.
+- **(Interpretation)** The weak start site signal in **PTC- ref ATG retained** is the more biologically interesting finding. These rank-0 ORFs *are* the reference CDS (100%), yet their Kozak context is weaker than PTC+ reference CDS ORFs (PWM `r if(has_fasta) round(kozak_summary$mean_pwm[kozak_summary$subgroup == "NMD PTC-, ref ATG retained"], 2)` vs `r if(has_fasta) round(kozak_summary$mean_pwm[kozak_summary$subgroup == "NMD PTC+"], 2)`). The reference reading frame does not produce a PTC with downstream EJCs, so the model cannot rely on canonical start-site features. The elevated ATG branch importance for this subgroup (Section 6.7) likely reflects the model attending to the broader 5'UTR landscape rather than the Kozak motif itself.
 
 ## 6.5 Stop Site Signals by Subgroup {#sec6-stop-subgroup}
 
