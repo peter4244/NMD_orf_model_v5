@@ -289,9 +289,15 @@ cat(sprintf("DeepSHAP subset: 2,000 samples (~%d NMD, ~%d Control) per replicate
 ## Architecture and Interpretation Framework
 
 ```{r fig0-architecture, fig.width=16, fig.height=20, eval=file.exists("make_architecture_figure.R")}
-# ── Source: make_architecture_figure.R (static diagram) ──
+# ── Source: make_architecture_figure.R (model architecture) ──
 source("make_architecture_figure.R")
 print(p)
+```
+
+```{r fig0-shap-interpretation, fig.width=12, fig.height=6, eval=file.exists("make_shap_interpretation_figure.R")}
+# ── Source: make_shap_interpretation_figure.R (SHAP interpretation detail) ──
+source("make_shap_interpretation_figure.R")
+print(p_shap)
 ```
 
 ### From Transcript to Model Input
@@ -901,7 +907,7 @@ kz_p4_ctrl <- kz_val(2, "A", "ctrl") + kz_val(2, "C", "ctrl") + kz_val(2, "G", "
 
 **Question:** What does the model learn from the sequence context around and downstream of the stop codon?
 
-**Metric:** DeepSHAP on the stop branch (1000bp window centered on the rank-0 ORF's stop codon, capturing ~500bp of 3'UTR). Same population as Section 3.
+**Metric:** DeepSHAP on the stop branch (500-position window centered on the rank-0 ORF's stop codon, capturing ~250bp of 3'UTR). Same population as Section 3.
 
 ## 4.1 Stop Codon Identity {#sec4-stop-codon}
 
@@ -1207,7 +1213,7 @@ p_dose <- ejc_summary %>%
   geom_text(aes(y = 0.03, label = sprintf("n=%d", n)), size = 2.5, color = "white") +
   scale_y_continuous(limits = c(0, 1.02), labels = percent_format()) +
   labs(title = "A. NMD Prediction by Downstream EJC Count",
-       subtitle = sprintf("Mean P(NMD) +/- SE. n = %s NMD transcripts, STOP=1000 model.",
+       subtitle = sprintf("Mean P(NMD) +/- SE. n = %s NMD transcripts, STOP=500 model.",
                           format(n_nmd, big.mark = ",")),
        x = "Number of downstream EJCs (rank-0 ORF)", y = "Mean P(NMD)") +
   theme(panel.grid.minor = element_blank(),
@@ -1243,7 +1249,7 @@ save_fig(p_dose / p_shap_ord, "fig4c_ejc_analysis", width = 10, height = 9)
 
 **Observations:**
 
-- **(Data)** The largest prediction jump is 0→1 EJC (P(NMD) from 56% to 88%). Additional EJCs provide diminishing but real gains: 2 EJCs = 94%, 3 = 96%, 5+ = 97%.
+- **(Data)** The largest prediction jump is 0→1 EJC (P(NMD) from `r sprintf("%.0f%%", 100*ejc_summary$mean_prob[ejc_summary$n_ejc_capped==0])` to `r sprintf("%.0f%%", 100*ejc_summary$mean_prob[ejc_summary$n_ejc_capped==1])`). Additional EJCs provide diminishing but real gains: 2 EJCs = `r sprintf("%.0f%%", 100*ejc_summary$mean_prob[ejc_summary$n_ejc_capped==2])`, 3 = `r sprintf("%.0f%%", 100*ejc_summary$mean_prob[ejc_summary$n_ejc_capped==3])`, 5+ = `r sprintf("%.0f%%", 100*ejc_summary$mean_prob[ejc_summary$n_ejc_capped==5])`.
 - **(Data)** Per-junction SHAP magnitude is roughly constant across distance and ordinal — the 1st and 4th EJC contribute similarly when present. The model treats each EJC as an additive NMD signal.
 
 ## 4.4 GC Enrichment Signal at Coding-UTR Boundaries {#sec4-gc}
@@ -1567,7 +1573,7 @@ save_fig(p_entropy, "fig4a_entropy")
 - **Attention weight:** Softmax-normalized score per ORF (sums to 1). Measures ORF selection, NOT prediction direction.
 - **ORF rank:** Priority order: 0 = ref CDS ORF (if available), then SQANTI CDS, then filled by descending Kozak score.
 
-<details><summary>Table 4: Entropy statistics</summary>
+<details><summary>Table 5a: Entropy statistics</summary>
 
 ```{r table4-entropy}
 ent_stats <- entropy_summary %>%
@@ -1577,7 +1583,7 @@ ent_stats <- entropy_summary %>%
             mean_eff_orfs = round(mean(effective_orfs), 2),
             pct_rank0_dominant = round(100 * mean(argmax_orf == 0), 1),
             .groups = "drop")
-render_dt(ent_stats, caption = "Table 4: Attention entropy by NMD status")
+render_dt(ent_stats, caption = "Table 5a: Attention entropy by NMD status")
 ```
 </details>
 
@@ -1639,7 +1645,7 @@ save_fig(p_max_attn, "fig5c_max_attn_density")
 - **(Data)** The median max attention weight is `r round(median(max_attn_per_iso$max_weight[max_attn_per_iso$class == "NMD"]), 3)` for NMD and `r round(median(max_attn_per_iso$max_weight[max_attn_per_iso$class == "Control"]), 3)` for Control. Both classes show strong single-ORF dominance, with most isoforms concentrating >50% of attention on one ORF.
 - **(Data)** NMD isoforms have slightly lower max attention weights than Controls, consistent with the higher attention entropy observed above — the model is less certain about ORF selection for NMD transcripts.
 
-<details><summary>Table 4b: ORF composition by rank and NMD status</summary>
+<details><summary>Table 5b: ORF composition by rank and NMD status</summary>
 
 ```{r table4b-orf-composition}
 # ── Data provenance ──
@@ -1654,7 +1660,7 @@ rank01_comp <- test_orfs %>%
   mutate(pct = round(100 * n / sum(n), 1)) %>% ungroup()
 
 render_dt(rank01_comp,
-          caption = "Table 4b: ORF selection reason by rank and NMD status (ref_cds / sqanti_cds / kozak)")
+          caption = "Table 5b: ORF selection reason by rank and NMD status (ref_cds / sqanti_cds / kozak)")
 ```
 
 </details>
@@ -1782,7 +1788,7 @@ save_fig(p_subgroups, "fig6a_subgroup_counts", width = 9, height = 4)
 - **PTC status** is defined by the best available CDS: first by the reference CDS frame (`ref_downstream_ejc > 0`), then by the TD2 CDS frame (`td2_downstream_ejc > 0`) for transcripts where the reference ATG is lost. This reclassifies ~47% of the original ref-ATG-lost group as PTC+ (they have PTCs from the TD2 reading frame).
 - The **ref ATG lost, PTC-** group has zero-filled ref-CDS features but valid TD2 features. These transcripts lack PTCs by both reading frame definitions and represent the most clearly non-canonical NMD subpopulation.
 
-<details><summary>Table 7a: Subgroup counts</summary>
+<details><summary>Table 6a: Subgroup counts</summary>
 ```{r table7a-subgroup-counts}
 render_dt(subgroup_counts, caption = "Table 6a: Test set isoform subgroups")
 ```
@@ -2286,7 +2292,7 @@ render_dt(
     select(subgroup, n, pct_struct, pct_stop, pct_atg, total,
            atg_signed, stop_signed, struct_signed) %>%
     mutate(across(c(total, atg_signed, stop_signed, struct_signed), ~round(., 4))),
-  caption = "Table 6: Branch decomposition by NMD subgroup (KernelSHAP)")
+  caption = "Table 6b: Branch decomposition by NMD subgroup (KernelSHAP)")
 ```
 
 ```{r sec6-branch-obs, eval=has_kernel_shap, results='asis'}
@@ -2414,7 +2420,7 @@ orf_type_attn <- attn_sg %>%
     .groups = "drop"
   )
 render_dt(orf_type_attn,
-          caption = "Table 6d: Attention on rank-0 ORF by subgroup and CDS type")
+          caption = "Table 6c: Attention on rank-0 ORF by subgroup and CDS type")
 ```
 
 <details><summary>**Variable definitions** (click to expand)</summary>
@@ -2498,11 +2504,11 @@ p_acc <- q_summary %>%
 save_fig(p_ent_sub / p_acc, "fig6e_entropy_by_subgroup", width = 10, height = 8)
 ```
 
-<details><summary>Table 7c: Entropy quartile summary</summary>
+<details><summary>Table 6d: Entropy quartile summary</summary>
 ```{r table7c-entropy}
 render_dt(q_summary %>%
             mutate(across(where(is.numeric), ~round(., 3))),
-          caption = "Table 6e: NMD transcripts by attention entropy quartile")
+          caption = "Table 6d: NMD transcripts by attention entropy quartile")
 ```
 </details>
 
@@ -2607,7 +2613,7 @@ save_fig(p_feat, "fig7b_features_by_outcome", height = 8)
 - **TP:** NMD correctly predicted (prob > 0.5). **FN:** NMD missed. **FP:** Control falsely flagged. **TN:** Control correct.
 - **Calibration plot:** Perfect calibration follows the diagonal. Point size = bin count.
 
-<details><summary>Table 6a: False Negative characterization</summary>
+<details><summary>Table 7a: False Negative characterization</summary>
 ```{r table7a-fn}
 fn_char <- test_rank0 %>%
   left_join(preds %>% select(isoform_id, outcome), by = "isoform_id") %>%
@@ -2617,11 +2623,11 @@ fn_char <- test_rank0 %>%
             pct_downstream_ejc = round(100 * mean(has_downstream_ejc == 1), 1),
             median_prob = round(median(prob), 3),
             mean_orf_length = round(mean(orf_length)))
-render_dt(fn_char, caption = "Table 6a: False negatives (NMD predicted as non-NMD)")
+render_dt(fn_char, caption = "Table 7a: False negatives (NMD predicted as non-NMD)")
 ```
 </details>
 
-<details><summary>Table 6b: False Positive characterization</summary>
+<details><summary>Table 7b: False Positive characterization</summary>
 ```{r table7b-fp}
 fp_char <- test_rank0 %>%
   left_join(preds %>% select(isoform_id, outcome), by = "isoform_id") %>%
@@ -2699,11 +2705,11 @@ p_prob <- nmd_subgroups %>%
 save_fig(p_sens / p_prob, "fig7c_performance_by_subgroup", width = 10, height = 8)
 ```
 
-<details><summary>Table 7b: Performance by subgroup</summary>
+<details><summary>Table 7c: Performance by subgroup</summary>
 ```{r table7b-performance}
 render_dt(perf_by_subgroup %>%
             mutate(across(where(is.numeric), ~round(., 3))),
-          caption = "Table 7b: Model performance by NMD subgroup")
+          caption = "Table 7c: Model performance by NMD subgroup")
 ```
 </details>
 
