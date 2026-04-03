@@ -10,7 +10,7 @@
 
 # v5 joint DeepSHAP for ORF ranks 2-4 (ranks 0-1 already completed)
 # SLURM_ARRAY_TASK_ID maps directly to orf_index (2,3,4)
-# All test samples, 100 background, single run per ORF
+# All test samples, 500 background (matching ORF 1 run), single run per ORF
 
 cd /home/p.castaldi/cc/nmd_orf_model_v5
 eval "$(conda shell.bash hook)"
@@ -18,15 +18,29 @@ conda activate nmd_model
 
 ORF_INDEX=${SLURM_ARRAY_TASK_ID}
 
+# Keep GPU active during data loading to avoid idle-GPU cancellation.
+# Runs a small GPU op every 60s in the background; killed once main job finishes.
+python -c "
+import torch, time
+while True:
+    x = torch.randn(256,256,device='cuda')
+    torch.cuda.synchronize()
+    del x
+    time.sleep(60)
+" &
+KEEPALIVE_PID=$!
+
 echo "ORF rank ${ORF_INDEX}, JOINT, all test, 500 bg"
 
 python deepshap.py \
     --config config.yaml \
     --n-explain 0 \
-    --n-background 100 \
+    --n-background 500 \
     --atg-window 500 \
     --stop-window 500 \
     --seed 100 \
     --run-id 1 \
     --branches joint \
     --orf-index ${ORF_INDEX}
+
+kill $KEEPALIVE_PID 2>/dev/null
